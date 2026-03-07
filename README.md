@@ -83,4 +83,4 @@ The study was submitted to the **International Meeting of the Psychometric Socie
 
 **Kentaro Suzuki**
 - MA Quantitative Methods in Psychology, York University (Expected Summer 2026)
-- [LinkedIn](www.linkedin.com/in/kentaro-suzuki-a467a2137) · [Email](mailto:ken100@yorku.ca)
+- [LinkedIn](https://www.linkedin.com/in/kentaro-suzuki-a467a2137/) · [Email](mailto:ken100@yorku.ca)
