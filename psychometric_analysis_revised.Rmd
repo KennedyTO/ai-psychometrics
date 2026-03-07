@@ -1,6 +1,6 @@
 ---
 title: "Psychometric Analysis: IIC, Reliability, EFA, CFA"
-subtitle: "AI-Generated Resolution Scales & Zhang et al. (2025) Criterion Scale"
+subtitle: "AI-Generated Cognitive Fluency (CF) Resolution Scales & Zhang et al. (2025) Criterion Scale"
 author: "Kentaro Suzuki"
 date: "`r Sys.Date()`"
 output:
