@@ -7,7 +7,7 @@ Psychometric validation of AI-generated psychological scales using a 2 (LLM) × 
 
 > Can large language models generate psychometrically sound measurement items? This project provides the empirical evidence.
 
-📄 **[View the Full Interactive Report →](https://kennedyto.github.io/ai-psychometrics/)**
+📄 **[View the Full Interactive Report for AI-Generated Cognitive Fluency Scale →](https://kennedyto.github.io/ai-psychometrics/)**
 
 ---
 
