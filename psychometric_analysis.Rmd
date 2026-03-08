@@ -1,0 +1,1081 @@
+---
+title: "Psychometric Analysis: IIC, Reliability, EFA, CFA"
+subtitle: "AI-Generated Resolution Scales & Zhang et al. (2025) Criterion Scale"
+author: "Kentaro Suzuki"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    theme: flatly
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 11,
+  fig.height = 7.5,
+  fig.retina = 2,
+  comment = ""
+)
+```
+
+# Setup
+
+## Packages and Paths
+
+```{r packages}
+required_pkgs <- c("lavaan", "psych", "GPArotation", "ggplot2", "tidyr", "patchwork")
+for (pkg in required_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE))
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+}
+library(lavaan)
+library(psych)
+library(GPArotation)
+library(ggplot2)
+library(tidyr)
+library(patchwork)
+```
+
+```{r paths}
+DATA_DIR    <- file.path("~", "Library", "CloudStorage",
+                         "OneDrive-YorkUniversity",
+                         "MASTERS THESIS", "Master_Dataset", "cleaned_data")
+IMPUTED_DIR <- file.path(DATA_DIR, "imputed_data")
+OUT_DIR     <- file.path(DATA_DIR, "R_fresh")
+if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
+
+M_IMPUTATIONS <- 20
+```
+
+## Scale Definitions
+
+This study uses a 2 (LLM: GPT-5, Google Gemini Flash 2.5) × 3 (Prompt Strategy: Zero-Shot, Few-Shot-Basic, Few-Shot-Advanced) between-subjects design, producing 6 AI-generated scales. Each contains 6 items rated on a 7-point Likert scale. The criterion scale (Zhang et al., 2025) contains 18 items across three subscales: Interaction (*k* = 11), Truth (*k* = 4), and Resolution (*k* = 3).
+
+```{r scale-definitions}
+ai_scales <- list(
+  "GPT5 Zero-Shot" = list(
+    file  = "cf_gpt5_z_resolution.csv",
+    items = paste0("Res_Item", 1:6)),
+  "GPT5 Few-Shot-Basic" = list(
+    file  = "cf_gpt5_f_basic_resolution.csv",
+    items = paste0("Res_Item", 1:6)),
+  "GPT5 Few-Shot-Advanced" = list(
+    file  = "cf_gpt5_f_adv_resolution.csv",
+    items = paste0("Res_Item", 1:6)),
+
+  "Google Zero-Shot" = list(
+    file  = "cf_google_z_resolution.csv",
+    items = c("Res_Item1", "Res_Item2", "Res_Item3_R",
+              "Res_Item4", "Res_Item5", "Res_Item6")),
+  "Google Few-Shot-Basic" = list(
+    file  = "cf_google_f_basic_resolution.csv",
+    items = paste0("Res_Item", 1:6)),
+  "Google Few-Shot-Advanced" = list(
+    file  = "cf_google_f_adv_resolution.csv",
+    items = paste0("Res_Item", 1:6))
+)
+
+cri_interaction <- paste0("CF_CRI_TRU.", 0:10)
+cri_truth       <- paste0("CF_CRI_TRU.", 11:14)
+cri_resolution  <- paste0("CF_CRI_TRU.", 15:17)
+cri_full        <- paste0("CF_CRI_TRU.", 0:17)
+
+cri_subscales <- list(
+  "Criterion: Interaction"  = cri_interaction,
+  "Criterion: Truth"        = cri_truth,
+  "Criterion: Resolution"   = cri_resolution,
+  "Criterion: Full 18-item" = cri_full
+)
+```
+
+## Load Data
+
+```{r load-ai-data}
+ai_data <- list()
+for (nm in names(ai_scales)) {
+  fpath <- file.path(DATA_DIR, ai_scales[[nm]]$file)
+  raw   <- read.csv(fpath)
+  items <- ai_scales[[nm]]$items
+  dat   <- raw[, items, drop = FALSE]
+  dat   <- dat[complete.cases(dat), , drop = FALSE]
+  ai_data[[nm]] <- dat
+}
+```
+
+```{r load-imputed-data}
+imputed_dfs <- list()
+for (m in seq_len(M_IMPUTATIONS)) {
+  fname <- file.path(IMPUTED_DIR, sprintf("imputed_m%02d.csv", m))
+  if (file.exists(fname)) {
+    imputed_dfs[[m]] <- read.csv(fname)
+  } else {
+    warning(sprintf("Imputed file %s not found — skipping", fname))
+  }
+}
+has_imputed <- length(imputed_dfs) == M_IMPUTATIONS
+if (!has_imputed) {
+  cat("WARNING: Not all 20 imputed datasets found.",
+      "Criterion MI analyses will be skipped.\n")
+}
+```
+
+## Helper Functions
+
+```{r helpers}
+fmt <- function(x, d = 3) sprintf(paste0("%.", d, "f"), x)
+
+verdict_cfi   <- function(x) ifelse(x >= .95, "GOOD", ifelse(x >= .90, "ACCEPTABLE", "POOR"))
+verdict_tli   <- function(x) ifelse(x >= .95, "GOOD", ifelse(x >= .90, "ACCEPTABLE", "POOR"))
+verdict_rmsea <- function(x) ifelse(x <= .06, "GOOD", ifelse(x <= .08, "ACCEPTABLE", "POOR"))
+verdict_srmr  <- function(x) ifelse(x <= .08, "GOOD", "POOR")
+
+flag_loading <- function(x) ifelse(abs(x) < .40, " [LOW]", "")
+flag_itc     <- function(x) ifelse(x < .30, " [LOW]", "")
+
+pool_corr_fisher <- function(corr_list) {
+  z_list <- lapply(corr_list, atanh)
+  z_avg  <- Reduce(`+`, z_list) / length(z_list)
+  pooled <- tanh(z_avg)
+  diag(pooled) <- 1.0
+  pooled
+}
+
+print_iic_matrix <- function(corr_mat, means, sds, item_names, scale_name) {
+  k <- length(item_names)
+  cat(sprintf("\n  %-18s", ""))
+  for (j in seq_len(k)) cat(sprintf(" %10s", item_names[j]))
+  cat(sprintf(" %8s %8s\n", "M", "SD"))
+
+  for (i in seq_len(k)) {
+    cat(sprintf("  %-18s", item_names[i]))
+    for (j in seq_len(k)) {
+      if (j < i) {
+        r <- corr_mat[i, j]
+        flag <- ""
+        if (r < .15) flag <- "*W"
+        if (r > .80) flag <- "*H"
+        if (grepl("Google Zero-Shot", scale_name) &&
+            (item_names[i] == "Res_Item3_R" || item_names[j] == "Res_Item3_R")) {
+          flag <- paste0(flag, "^R")
+        }
+        cat(sprintf(" %10s", paste0(fmt(r), flag)))
+      } else if (j == i) {
+        cat(sprintf(" %10s", "\u2014"))
+      } else {
+        cat(sprintf(" %10s", ""))
+      }
+    }
+    cat(sprintf(" %8s %8s\n", fmt(means[i]), fmt(sds[i])))
+  }
+}
+```
+
+
+# Inter-Item Correlations (IIC) {.tabset}
+
+## AI Scales
+
+```{r iic-ai, results='asis'}
+iic_rows <- list()
+
+for (nm in names(ai_scales)) {
+  dat   <- ai_data[[nm]]
+  items <- ai_scales[[nm]]$items
+  n     <- nrow(dat)
+  k     <- ncol(dat)
+
+  cat(sprintf("\n### %s (n = %d, k = %d)\n\n", nm, n, k))
+  cat("```\n")
+
+  corr_mat <- cor(dat, use = "pairwise.complete.obs")
+  means_v  <- colMeans(dat, na.rm = TRUE)
+  sds_v    <- apply(dat, 2, sd, na.rm = TRUE)
+
+  lt       <- corr_mat[lower.tri(corr_mat)]
+  mean_iic <- mean(lt)
+  sd_iic   <- sd(lt)
+  min_iic  <- min(lt)
+  max_iic  <- max(lt)
+
+  cat(sprintf("  Mean IIC = %s  |  SD = %s  |  Range: [%s, %s]\n",
+              fmt(mean_iic), fmt(sd_iic), fmt(min_iic), fmt(max_iic)))
+
+  weak  <- which(corr_mat < .15 & lower.tri(corr_mat), arr.ind = TRUE)
+  vhigh <- which(corr_mat > .80 & lower.tri(corr_mat), arr.ind = TRUE)
+  if (nrow(weak) > 0) {
+    cat("  FLAGGED WEAK (< .15):\n")
+    for (row_i in seq_len(nrow(weak)))
+      cat(sprintf("    %s -- %s: r = %s\n",
+                  items[weak[row_i, 1]], items[weak[row_i, 2]],
+                  fmt(corr_mat[weak[row_i, 1], weak[row_i, 2]])))
+  }
+  if (nrow(vhigh) > 0) {
+    cat("  FLAGGED VERY HIGH (> .80):\n")
+    for (row_i in seq_len(nrow(vhigh)))
+      cat(sprintf("    %s -- %s: r = %s\n",
+                  items[vhigh[row_i, 1]], items[vhigh[row_i, 2]],
+                  fmt(corr_mat[vhigh[row_i, 1], vhigh[row_i, 2]])))
+  }
+
+  if (grepl("Google Zero-Shot", nm)) {
+    idx_r <- which(items == "Res_Item3_R")
+    cat("  [FLAGGED: Res_Item3_R is reverse-coded (already reverse-scored).]\n")
+    cat("  Res_Item3_R pairwise correlations:\n")
+    for (j in seq_len(k)) {
+      if (j != idx_r)
+        cat(sprintf("    %s -- Res_Item3_R: r = %s\n",
+                    items[j], fmt(corr_mat[j, idx_r])))
+    }
+  }
+
+  print_iic_matrix(corr_mat, means_v, sds_v, items, nm)
+
+  cat("```\n\n")
+
+  out_mat <- round(corr_mat, 3)
+  out_df  <- as.data.frame(out_mat)
+  out_df$M  <- round(means_v, 3)
+  out_df$SD <- round(sds_v, 3)
+  write.csv(out_df, file.path(OUT_DIR, sprintf("iic_%s.csv", gsub(" ", "_", nm))),
+            row.names = TRUE)
+
+  iic_rows[[nm]] <- data.frame(
+    Scale = nm, n = n, mean_IIC = mean_iic, SD_IIC = sd_iic,
+    min_IIC = min_iic, max_IIC = max_iic, MI_Pooled = "No",
+    stringsAsFactors = FALSE)
+}
+```
+
+## Criterion Subscales (Pooled, *m* = 20)
+
+```{r iic-criterion, results='asis'}
+if (has_imputed) {
+  for (sub_nm in names(cri_subscales)) {
+    sub_items <- cri_subscales[[sub_nm]]
+    k <- length(sub_items)
+
+    corr_list  <- list()
+    means_list <- matrix(NA, nrow = M_IMPUTATIONS, ncol = k)
+    sds_list   <- matrix(NA, nrow = M_IMPUTATIONS, ncol = k)
+    ns         <- integer(M_IMPUTATIONS)
+
+    for (m in seq_len(M_IMPUTATIONS)) {
+      d <- imputed_dfs[[m]][, sub_items, drop = FALSE]
+      d <- d[complete.cases(d), , drop = FALSE]
+      ns[m] <- nrow(d)
+      corr_list[[m]]  <- cor(d, use = "pairwise.complete.obs")
+      means_list[m, ] <- colMeans(d, na.rm = TRUE)
+      sds_list[m, ]   <- apply(d, 2, sd, na.rm = TRUE)
+    }
+
+    avg_n        <- round(mean(ns))
+    pooled_corr  <- pool_corr_fisher(corr_list)
+    pooled_means <- colMeans(means_list)
+    pooled_sds   <- sqrt(colMeans(sds_list^2))
+    rownames(pooled_corr) <- colnames(pooled_corr) <- sub_items
+
+    lt       <- pooled_corr[lower.tri(pooled_corr)]
+    mean_iic <- mean(lt)
+    sd_iic   <- sd(lt)
+    min_iic  <- min(lt)
+    max_iic  <- max(lt)
+
+    cat(sprintf("\n### %s (avg n = %d, k = %d)\n\n", sub_nm, avg_n, k))
+    cat("```\n")
+    cat(sprintf("  Mean IIC = %s  |  SD = %s  |  Range: [%s, %s]\n",
+                fmt(mean_iic), fmt(sd_iic), fmt(min_iic), fmt(max_iic)))
+
+    weak  <- which(pooled_corr < .15 & lower.tri(pooled_corr), arr.ind = TRUE)
+    vhigh <- which(pooled_corr > .80 & lower.tri(pooled_corr), arr.ind = TRUE)
+    if (nrow(weak) > 0) {
+      cat("  FLAGGED WEAK (< .15):\n")
+      for (row_i in seq_len(nrow(weak)))
+        cat(sprintf("    %s -- %s: r = %s\n",
+                    sub_items[weak[row_i, 1]], sub_items[weak[row_i, 2]],
+                    fmt(pooled_corr[weak[row_i, 1], weak[row_i, 2]])))
+    }
+    if (nrow(vhigh) > 0) {
+      cat("  FLAGGED VERY HIGH (> .80):\n")
+      for (row_i in seq_len(nrow(vhigh)))
+        cat(sprintf("    %s -- %s: r = %s\n",
+                    sub_items[vhigh[row_i, 1]], sub_items[vhigh[row_i, 2]],
+                    fmt(pooled_corr[vhigh[row_i, 1], vhigh[row_i, 2]])))
+    }
+
+    print_iic_matrix(pooled_corr, pooled_means, pooled_sds, sub_items, sub_nm)
+
+    cat("```\n\n")
+
+    out_mat <- round(pooled_corr, 3)
+    out_df  <- as.data.frame(out_mat)
+    out_df$M  <- round(pooled_means, 3)
+    out_df$SD <- round(pooled_sds, 3)
+    write.csv(out_df,
+              file.path(OUT_DIR, sprintf("iic_%s.csv", gsub("[: ]", "_", sub_nm))),
+              row.names = TRUE)
+
+    iic_rows[[sub_nm]] <- data.frame(
+      Scale = sub_nm, n = avg_n, mean_IIC = mean_iic, SD_IIC = sd_iic,
+      min_IIC = min_iic, max_IIC = max_iic, MI_Pooled = "Yes",
+      stringsAsFactors = FALSE)
+  }
+}
+```
+
+## IIC Summary
+
+```{r iic-summary}
+iic_df <- do.call(rbind, iic_rows)
+write.csv(iic_df, file.path(OUT_DIR, "iic_summary.csv"), row.names = FALSE)
+iic_df
+```
+
+
+# Reliability {.tabset}
+
+## AI Scales
+
+```{r rel-ai, results='asis'}
+rel_rows <- list()
+
+for (nm in names(ai_scales)) {
+  dat   <- ai_data[[nm]]
+  items <- ai_scales[[nm]]$items
+  n     <- nrow(dat)
+  k     <- ncol(dat)
+
+  cat(sprintf("\n### %s (n = %d, k = %d)\n\n", nm, n, k))
+  cat("```\n")
+
+  a <- psych::alpha(dat, check.keys = FALSE)
+  alpha_val  <- a$total$raw_alpha
+  alpha_ci_l <- a$feldt$lower.ci$raw_alpha
+  alpha_ci_u <- a$feldt$upper.ci$raw_alpha
+  mean_iic_a <- a$total$average_r
+  itc        <- a$item.stats$r.drop
+
+  suppressWarnings({
+    o <- psych::omega(dat, nfactors = 1, fm = "minres", plot = FALSE)
+  })
+  omega_h   <- o$omega_h
+  omega_tot <- o$omega.tot
+
+  cat(sprintf("  Alpha       = %s  [95%% CI: %s, %s]\n",
+              fmt(alpha_val), fmt(alpha_ci_l), fmt(alpha_ci_u)))
+  cat(sprintf("  Omega total = %s\n", fmt(omega_tot)))
+  cat(sprintf("  Omega hier. = %s\n", fmt(omega_h)))
+  cat(sprintf("  Mean IIC    = %s\n", fmt(mean_iic_a)))
+  cat(sprintf("  omega - alpha discrepancy = %s\n", fmt(omega_tot - alpha_val)))
+
+  cat("\n  Corrected Item-Total Correlations:\n")
+  for (i in seq_along(items)) {
+    fl <- flag_itc(itc[i])
+    extra <- ""
+    if (grepl("Google Zero-Shot", nm) && items[i] == "Res_Item3_R")
+      extra <- " [FLAGGED: reverse-coded item, low item-total r]"
+    cat(sprintf("    %-18s r.drop = %s%s%s\n", items[i], fmt(itc[i]), fl, extra))
+  }
+
+  cat("```\n\n")
+
+  rel_rows[[nm]] <- data.frame(
+    Scale = nm, n = n, k = k,
+    alpha = alpha_val, CI_low = alpha_ci_l, CI_high = alpha_ci_u,
+    omega_tot = omega_tot, omega_h = omega_h,
+    mean_IIC = mean_iic_a, FMI = NA_real_, MI_Pooled = "No",
+    stringsAsFactors = FALSE)
+}
+```
+
+## Criterion Subscales (Pooled, *m* = 20)
+
+```{r rel-criterion, results='asis'}
+if (has_imputed) {
+  for (sub_nm in names(cri_subscales)) {
+    sub_items <- cri_subscales[[sub_nm]]
+    k <- length(sub_items)
+
+    alphas         <- numeric(M_IMPUTATIONS)
+    alpha_ci_lows  <- numeric(M_IMPUTATIONS)
+    alpha_ci_highs <- numeric(M_IMPUTATIONS)
+    omegas         <- numeric(M_IMPUTATIONS)
+    mean_iics      <- numeric(M_IMPUTATIONS)
+    itc_mat        <- matrix(NA, nrow = M_IMPUTATIONS, ncol = k)
+    ns             <- integer(M_IMPUTATIONS)
+
+    for (m in seq_len(M_IMPUTATIONS)) {
+      d <- imputed_dfs[[m]][, sub_items, drop = FALSE]
+      d <- d[complete.cases(d), , drop = FALSE]
+      ns[m] <- nrow(d)
+
+      a <- psych::alpha(d, check.keys = FALSE)
+      alphas[m]         <- a$total$raw_alpha
+      alpha_ci_lows[m]  <- a$feldt$lower.ci$raw_alpha
+      alpha_ci_highs[m] <- a$feldt$upper.ci$raw_alpha
+      mean_iics[m]      <- a$total$average_r
+      itc_mat[m, ]      <- a$item.stats$r.drop
+
+      suppressWarnings({
+        o <- psych::omega(d, nfactors = 1, fm = "minres", plot = FALSE)
+      })
+      omegas[m] <- o$omega.tot
+    }
+
+    avg_n <- round(mean(ns))
+
+    # Pool alpha — full Rubin's rules
+    pooled_alpha <- mean(alphas)
+    se_within    <- (alpha_ci_highs - alpha_ci_lows) / (2 * 1.96)
+    U_bar        <- mean(se_within^2)
+    B            <- var(alphas)
+    T_var        <- U_bar + (1 + 1 / M_IMPUTATIONS) * B
+    pooled_se    <- sqrt(T_var)
+    pooled_ci_l  <- pooled_alpha - 1.96 * pooled_se
+    pooled_ci_u  <- pooled_alpha + 1.96 * pooled_se
+    fmi          <- (B + B / M_IMPUTATIONS) / T_var
+
+    pooled_omega <- mean(omegas)
+
+    z_iics     <- atanh(mean_iics)
+    pooled_iic <- tanh(mean(z_iics))
+
+    pooled_itc <- colMeans(itc_mat)
+
+    cat(sprintf("\n### %s (avg n = %d, k = %d)\n\n", sub_nm, avg_n, k))
+    cat("```\n")
+    cat(sprintf("  Pooled Alpha       = %s  [95%% CI: %s, %s]\n",
+                fmt(pooled_alpha), fmt(pooled_ci_l), fmt(pooled_ci_u)))
+    cat(sprintf("  FMI (alpha)        = %s\n", fmt(fmi)))
+    cat(sprintf("  Pooled Omega total = %s\n", fmt(pooled_omega)))
+    cat(sprintf("  Pooled Mean IIC    = %s\n", fmt(pooled_iic)))
+    cat(sprintf("  Alpha range across m: [%s, %s]\n",
+                fmt(min(alphas)), fmt(max(alphas))))
+    cat(sprintf("  omega - alpha discrepancy = %s\n",
+                fmt(pooled_omega - pooled_alpha)))
+
+    cat("\n  Pooled Corrected Item-Total Correlations:\n")
+    for (i in seq_along(sub_items)) {
+      fl <- flag_itc(pooled_itc[i])
+      cat(sprintf("    %-18s r.drop = %s%s\n", sub_items[i], fmt(pooled_itc[i]), fl))
+    }
+
+    cat("```\n\n")
+
+    rel_rows[[sub_nm]] <- data.frame(
+      Scale = sub_nm, n = avg_n, k = k,
+      alpha = pooled_alpha, CI_low = pooled_ci_l, CI_high = pooled_ci_u,
+      omega_tot = pooled_omega, omega_h = NA_real_,
+      mean_IIC = pooled_iic, FMI = fmi, MI_Pooled = "Yes",
+      stringsAsFactors = FALSE)
+  }
+}
+```
+
+## Reliability Summary
+
+```{r rel-summary}
+rel_df <- do.call(rbind, rel_rows)
+write.csv(rel_df, file.path(OUT_DIR, "reliability_summary.csv"), row.names = FALSE)
+rel_df
+```
+
+
+# Exploratory Factor Analysis (EFA) {.tabset}
+
+## AI Scales
+
+```{r efa-ai, results='asis'}
+efa_rows <- list()
+
+for (nm in names(ai_scales)) {
+  dat   <- ai_data[[nm]]
+  items <- ai_scales[[nm]]$items
+  n     <- nrow(dat)
+  k     <- ncol(dat)
+
+  cat(sprintf("\n### %s (n = %d, k = %d)\n\n", nm, n, k))
+  cat("```\n")
+
+  # Factorability
+  corr_mat <- cor(dat, use = "pairwise.complete.obs")
+  bart     <- psych::cortest.bartlett(corr_mat, n = n)
+  kmo      <- psych::KMO(dat)
+
+  cat(sprintf("  Bartlett's test: chi2 = %s, p = %s\n",
+              fmt(bart$chisq, 2), formatC(bart$p.value, format = "e", digits = 3)))
+  cat(sprintf("  KMO overall MSA = %s\n", fmt(kmo$MSA)))
+  cat("  Per-item MSAi:\n")
+  for (i in seq_along(items)) {
+    fl <- if (kmo$MSAi[i] < .50) " [LOW]" else ""
+    cat(sprintf("    %-18s MSAi = %s%s\n", items[i], fmt(kmo$MSAi[i]), fl))
+  }
+
+  # Parallel analysis
+  set.seed(42)
+  pa <- psych::fa.parallel(dat, fm = "pa", fa = "fa", plot = FALSE)
+  n_factors <- pa$nfact
+  cat(sprintf("\n  Parallel analysis suggests %d factor(s)\n", n_factors))
+  cat(sprintf("  Observed eigenvalues:  %s\n",
+              paste(fmt(pa$fa.values), collapse = ", ")))
+  cat(sprintf("  Simulated 95th pctl:   %s\n",
+              paste(fmt(pa$fa.sim), collapse = ", ")))
+
+  # 1-factor solution
+  cat("\n  --- 1-Factor Solution ---\n")
+  fa1    <- psych::fa(dat, nfactors = 1, fm = "pa", rotate = "none")
+  loads1 <- fa1$loadings[, 1]
+  comms1 <- fa1$communalities
+  var1   <- fa1$Vaccounted["Proportion Var", 1]
+  cat(sprintf("  Variance explained: %s\n", fmt(var1)))
+  cat("  Loadings and communalities:\n")
+  for (i in seq_along(items)) {
+    fl <- flag_loading(loads1[i])
+    cat(sprintf("    %-18s loading = %s%s   h2 = %s\n",
+                items[i], fmt(loads1[i]), fl, fmt(comms1[i])))
+  }
+
+  if (n_factors >= 2) {
+    cat(sprintf("\n  --- %d-Factor Oblimin Solution ---\n", n_factors))
+    fa_multi <- psych::fa(dat, nfactors = n_factors, fm = "pa", rotate = "oblimin")
+    cat(sprintf("  Total variance explained: %s\n",
+                fmt(sum(fa_multi$Vaccounted["Proportion Var", ]))))
+    cat("  Pattern matrix:\n")
+    load_mat <- fa_multi$loadings[]
+    cat(sprintf("  %-18s", ""))
+    for (f in seq_len(n_factors)) cat(sprintf(" %10s", paste0("PA", f)))
+    cat(sprintf(" %8s\n", "h2"))
+    for (i in seq_along(items)) {
+      cat(sprintf("  %-18s", items[i]))
+      for (f in seq_len(n_factors)) {
+        fl <- flag_loading(load_mat[i, f])
+        cat(sprintf(" %10s", paste0(fmt(load_mat[i, f]), fl)))
+      }
+      cat(sprintf(" %8s\n", fmt(fa_multi$communalities[i])))
+    }
+    if (n_factors == 2 && !is.null(fa_multi$Phi)) {
+      cat(sprintf("  Factor correlation: %s\n", fmt(fa_multi$Phi[1, 2])))
+    }
+  }
+
+  cat("```\n\n")
+
+  efa_rows[[nm]] <- data.frame(
+    Scale = nm, n = n, KMO = kmo$MSA,
+    Bartlett_chi2 = bart$chisq, Bartlett_p = bart$p.value,
+    n_factors_parallel = n_factors, variance_explained_1f = var1,
+    MI_Pooled = "No", stringsAsFactors = FALSE)
+}
+```
+
+## Criterion Subscales (Pooled, *m* = 20)
+
+```{r efa-criterion, results='asis'}
+if (has_imputed) {
+  for (sub_nm in names(cri_subscales)) {
+    sub_items <- cri_subscales[[sub_nm]]
+    k <- length(sub_items)
+
+    corr_list <- list()
+    ns <- integer(M_IMPUTATIONS)
+    for (m in seq_len(M_IMPUTATIONS)) {
+      d <- imputed_dfs[[m]][, sub_items, drop = FALSE]
+      d <- d[complete.cases(d), , drop = FALSE]
+      ns[m] <- nrow(d)
+      corr_list[[m]] <- cor(d, use = "pairwise.complete.obs")
+    }
+    avg_n       <- round(mean(ns))
+    pooled_corr <- pool_corr_fisher(corr_list)
+    rownames(pooled_corr) <- colnames(pooled_corr) <- sub_items
+
+    cat(sprintf("\n### %s (avg n = %d, k = %d)\n\n", sub_nm, avg_n, k))
+    cat("```\n")
+
+    bart <- psych::cortest.bartlett(pooled_corr, n = avg_n)
+    kmo  <- psych::KMO(pooled_corr)
+
+    cat(sprintf("  Bartlett's test: chi2 = %s, p = %s\n",
+                fmt(bart$chisq, 2), formatC(bart$p.value, format = "e", digits = 3)))
+    cat(sprintf("  KMO overall MSA = %s\n", fmt(kmo$MSA)))
+    cat("  Per-item MSAi:\n")
+    for (i in seq_along(sub_items)) {
+      fl <- if (kmo$MSAi[i] < .50) " [LOW]" else ""
+      cat(sprintf("    %-18s MSAi = %s%s\n", sub_items[i], fmt(kmo$MSAi[i]), fl))
+    }
+
+    set.seed(42)
+    pa <- psych::fa.parallel(pooled_corr, n.obs = avg_n, fm = "pa",
+                             fa = "fa", plot = FALSE)
+    n_factors <- pa$nfact
+    cat(sprintf("\n  Parallel analysis suggests %d factor(s)\n", n_factors))
+    cat(sprintf("  Observed eigenvalues:  %s\n",
+                paste(fmt(pa$fa.values), collapse = ", ")))
+    cat(sprintf("  Simulated 95th pctl:   %s\n",
+                paste(fmt(pa$fa.sim), collapse = ", ")))
+
+    cat("\n  --- 1-Factor Solution ---\n")
+    fa1 <- psych::fa(pooled_corr, nfactors = 1, fm = "pa", rotate = "none",
+                     n.obs = avg_n, covar = FALSE)
+    loads1 <- fa1$loadings[, 1]
+    comms1 <- fa1$communalities
+    var1   <- fa1$Vaccounted["Proportion Var", 1]
+    cat(sprintf("  Variance explained: %s\n", fmt(var1)))
+    cat("  Loadings and communalities:\n")
+    for (i in seq_along(sub_items)) {
+      fl <- flag_loading(loads1[i])
+      cat(sprintf("    %-18s loading = %s%s   h2 = %s\n",
+                  sub_items[i], fmt(loads1[i]), fl, fmt(comms1[i])))
+    }
+
+    if (n_factors >= 2) {
+      cat(sprintf("\n  --- %d-Factor Oblimin Solution ---\n", n_factors))
+      fa_multi <- psych::fa(pooled_corr, nfactors = n_factors, fm = "pa",
+                            rotate = "oblimin", n.obs = avg_n, covar = FALSE)
+      cat(sprintf("  Total variance explained: %s\n",
+                  fmt(sum(fa_multi$Vaccounted["Proportion Var", ]))))
+      cat("  Pattern matrix:\n")
+      load_mat <- fa_multi$loadings[]
+      cat(sprintf("  %-18s", ""))
+      for (f in seq_len(n_factors)) cat(sprintf(" %10s", paste0("PA", f)))
+      cat(sprintf(" %8s\n", "h2"))
+      for (i in seq_along(sub_items)) {
+        cat(sprintf("  %-18s", sub_items[i]))
+        for (f in seq_len(n_factors)) {
+          fl <- flag_loading(load_mat[i, f])
+          cat(sprintf(" %10s", paste0(fmt(load_mat[i, f]), fl)))
+        }
+        cat(sprintf(" %8s\n", fmt(fa_multi$communalities[i])))
+      }
+
+      if (sub_nm == "Criterion: Full 18-item" && n_factors >= 2) {
+        cat("\n  Factor-to-subscale mapping:\n")
+        for (f in seq_len(n_factors)) {
+          high_items <- sub_items[abs(load_mat[, f]) >= .40]
+          cat(sprintf("    Factor PA%d: %s\n", f,
+                      paste(high_items, collapse = ", ")))
+          n_int <- sum(high_items %in% cri_interaction)
+          n_tru <- sum(high_items %in% cri_truth)
+          n_res <- sum(high_items %in% cri_resolution)
+          cat(sprintf("      (Interaction: %d, Truth: %d, Resolution: %d)\n",
+                      n_int, n_tru, n_res))
+        }
+      }
+    }
+
+    cat("```\n\n")
+
+    efa_rows[[sub_nm]] <- data.frame(
+      Scale = sub_nm, n = avg_n, KMO = kmo$MSA,
+      Bartlett_chi2 = bart$chisq, Bartlett_p = bart$p.value,
+      n_factors_parallel = n_factors, variance_explained_1f = var1,
+      MI_Pooled = "Yes", stringsAsFactors = FALSE)
+  }
+}
+```
+
+## EFA Summary
+
+```{r efa-summary}
+efa_df <- do.call(rbind, efa_rows)
+write.csv(efa_df, file.path(OUT_DIR, "efa_summary.csv"), row.names = FALSE)
+efa_df
+```
+
+
+# Confirmatory Factor Analysis (CFA) {.tabset}
+
+## AI Scales
+
+```{r cfa-ai, results='asis'}
+cfa_rows <- list()
+
+for (nm in names(ai_scales)) {
+  dat   <- ai_data[[nm]]
+  items <- ai_scales[[nm]]$items
+  n     <- nrow(dat)
+
+  cat(sprintf("\n### %s (n = %d)\n\n", nm, n))
+  cat("```\n")
+
+  item_str <- paste(items, collapse = " + ")
+  model    <- paste0("Resolution =~ ", item_str)
+
+  fit <- cfa(model, data = dat, estimator = "ML")
+  fi  <- fitMeasures(fit, c("chisq", "df", "pvalue",
+                            "cfi", "tli", "rmsea",
+                            "rmsea.ci.lower", "rmsea.ci.upper", "srmr"))
+  std <- standardizedSolution(fit)
+  loads_std <- std[std$op == "=~", ]
+
+  cat(sprintf("  Model: %s\n", model))
+  cat(sprintf("  chi2 = %s, df = %s, p = %s\n",
+              fmt(fi["chisq"], 2), fi["df"], fmt(fi["pvalue"])))
+  cat(sprintf("  CFI  = %s  [%s]\n", fmt(fi["cfi"]), verdict_cfi(fi["cfi"])))
+  cat(sprintf("  TLI  = %s  [%s]\n", fmt(fi["tli"]), verdict_tli(fi["tli"])))
+  cat(sprintf("  RMSEA = %s  90%% CI [%s, %s]  [%s]\n",
+              fmt(fi["rmsea"]), fmt(fi["rmsea.ci.lower"]),
+              fmt(fi["rmsea.ci.upper"]), verdict_rmsea(fi["rmsea"])))
+  cat(sprintf("  SRMR = %s  [%s]\n", fmt(fi["srmr"]), verdict_srmr(fi["srmr"])))
+
+  cat("\n  Standardized Factor Loadings:\n")
+  for (i in seq_len(nrow(loads_std))) {
+    fl <- flag_loading(loads_std$est.std[i])
+    extra <- ""
+    if (grepl("Google Zero-Shot", nm) && loads_std$rhs[i] == "Res_Item3_R")
+      extra <- " [FLAGGED: reverse-coded item]"
+    cat(sprintf("    %-18s lambda = %s (SE = %s)%s%s\n",
+                loads_std$rhs[i], fmt(loads_std$est.std[i]),
+                fmt(loads_std$se[i]), fl, extra))
+  }
+
+  cat("```\n\n")
+
+  cfa_rows[[nm]] <- data.frame(
+    Model = nm, n = n, estimator = "ML",
+    chi2 = unname(fi["chisq"]), df = unname(fi["df"]),
+    p = unname(fi["pvalue"]),
+    CFI = unname(fi["cfi"]), TLI = unname(fi["tli"]),
+    RMSEA = unname(fi["rmsea"]),
+    RMSEA_CI_low = unname(fi["rmsea.ci.lower"]),
+    RMSEA_CI_high = unname(fi["rmsea.ci.upper"]),
+    SRMR = unname(fi["srmr"]),
+    verdict = paste(verdict_cfi(fi["cfi"]), verdict_rmsea(fi["rmsea"]), sep = "/"),
+    stringsAsFactors = FALSE, row.names = NULL)
+}
+```
+
+## Criterion CFA Models (Pooled, *m* = 20)
+
+```{r cfa-criterion, results='asis'}
+if (has_imputed) {
+
+  cri_cfa_models <- list(
+    "Criterion: 3-Factor Full" = paste0(
+      "Interaction =~ ", paste(cri_interaction, collapse = " + "), "\n",
+      "Truth       =~ ", paste(cri_truth, collapse = " + "), "\n",
+      "Resolution  =~ ", paste(cri_resolution, collapse = " + ")),
+
+    "Criterion: Interaction 1-Factor" = paste0(
+      "Interaction =~ ", paste(cri_interaction, collapse = " + ")),
+
+    "Criterion: Interaction 2-Factor" = paste0(
+      "Conversational =~ ", paste(cri_interaction[1:6], collapse = " + "), "\n",
+      "Information    =~ ", paste(cri_interaction[7:11], collapse = " + ")),
+
+    "Criterion: Truth 1-Factor" = paste0(
+      "Truth =~ ", paste(cri_truth, collapse = " + ")),
+
+    "Criterion: Resolution 1-Factor" = paste0(
+      "Resolution =~ ", paste(cri_resolution, collapse = " + "))
+  )
+
+  fit_indices_names <- c("chisq", "df", "pvalue", "cfi", "tli",
+                         "rmsea", "rmsea.ci.lower", "rmsea.ci.upper", "srmr")
+
+  for (mod_nm in names(cri_cfa_models)) {
+    model <- cri_cfa_models[[mod_nm]]
+
+    cat(sprintf("\n### %s\n\n", mod_nm))
+    cat("```\n")
+
+    fi_mat    <- matrix(NA, nrow = M_IMPUTATIONS, ncol = length(fit_indices_names))
+    colnames(fi_mat) <- fit_indices_names
+    load_list <- list()
+    fcor_list <- list()
+    ns        <- integer(M_IMPUTATIONS)
+    converged <- logical(M_IMPUTATIONS)
+
+    for (m in seq_len(M_IMPUTATIONS)) {
+      d <- imputed_dfs[[m]]
+      needed <- unique(unlist(strsplit(
+        gsub(".*?=~", "", gsub("\n", " ", model)), "\\s*\\+\\s*")))
+      needed <- trimws(needed[nchar(needed) > 0])
+      d_sub  <- d[, needed, drop = FALSE]
+      d_sub  <- d_sub[complete.cases(d_sub), , drop = FALSE]
+      ns[m]  <- nrow(d_sub)
+
+      tryCatch({
+        fit <- cfa(model, data = d_sub, estimator = "ML")
+        converged[m] <- lavInspect(fit, "converged")
+        fi_mat[m, ]  <- fitMeasures(fit, fit_indices_names)
+
+        std <- standardizedSolution(fit)
+        load_list[[m]] <- std[std$op == "=~",
+                              c("lhs", "rhs", "est.std", "se")]
+
+        fcors <- std[std$op == "~~" & std$lhs != std$rhs &
+                       std$lhs %in% unique(std$lhs[std$op == "=~"]) &
+                       std$rhs %in% unique(std$lhs[std$op == "=~"]), ]
+        if (nrow(fcors) > 0) fcor_list[[m]] <- fcors
+      }, error = function(e) {
+        warning(sprintf("CFA failed for %s, imputation %d: %s",
+                        mod_nm, m, e$message))
+        converged[m] <<- FALSE
+      })
+    }
+
+    n_converged <- sum(converged)
+    avg_n <- round(mean(ns))
+
+    if (n_converged < M_IMPUTATIONS) {
+      cat(sprintf("  WARNING: %d of %d imputations converged\n",
+                  n_converged, M_IMPUTATIONS))
+    }
+    if (n_converged == 0) {
+      cat("  ERROR: No imputations converged. Skipping.\n")
+      cat("```\n\n")
+      next
+    }
+
+    fi_pooled <- colMeans(fi_mat[converged, , drop = FALSE], na.rm = TRUE)
+
+    cat(sprintf("  avg n = %d\n", avg_n))
+    cat(sprintf("  chi2 = %s, df = %s, p = %s\n",
+                fmt(fi_pooled["chisq"], 2), round(fi_pooled["df"]),
+                fmt(fi_pooled["pvalue"])))
+
+    is_just_identified <- round(fi_pooled["df"]) == 0
+
+    if (is_just_identified) {
+      cat("  [NOTE: Just-identified model, df=0. Fit indices are trivially perfect and uninterpretable.]\n")
+    }
+
+    cat(sprintf("  CFI  = %s  [%s]\n", fmt(fi_pooled["cfi"]),
+                if (is_just_identified) "N/A" else verdict_cfi(fi_pooled["cfi"])))
+    cat(sprintf("  TLI  = %s  [%s]\n", fmt(fi_pooled["tli"]),
+                if (is_just_identified) "N/A" else verdict_tli(fi_pooled["tli"])))
+    cat(sprintf("  RMSEA = %s  90%% CI [%s, %s]  [%s]\n",
+                fmt(fi_pooled["rmsea"]),
+                fmt(fi_pooled["rmsea.ci.lower"]),
+                fmt(fi_pooled["rmsea.ci.upper"]),
+                if (is_just_identified) "N/A" else verdict_rmsea(fi_pooled["rmsea"])))
+    cat(sprintf("  SRMR = %s  [%s]\n", fmt(fi_pooled["srmr"]),
+                verdict_srmr(fi_pooled["srmr"])))
+
+    cfi_range <- range(fi_mat[converged, "cfi"], na.rm = TRUE)
+    cat(sprintf("  CFI range across imputations: [%s, %s]\n",
+                fmt(cfi_range[1]), fmt(cfi_range[2])))
+
+    if (length(load_list) > 0 && any(converged)) {
+      ref <- load_list[[which(converged)[1]]]
+      cat("\n  Pooled Standardized Factor Loadings:\n")
+      for (r in seq_len(nrow(ref))) {
+        lvals <- sapply(load_list[converged], function(x) x$est.std[r])
+        pooled_load <- mean(lvals, na.rm = TRUE)
+        B_load      <- var(lvals, na.rm = TRUE)
+        fl <- flag_loading(pooled_load)
+        cat(sprintf("    %-18s on %-15s lambda = %s (B = %s)%s\n",
+                    ref$rhs[r], ref$lhs[r], fmt(pooled_load),
+                    fmt(B_load, 4), fl))
+      }
+    }
+
+    if (length(fcor_list) > 0 && any(converged)) {
+      valid_fc <- which(converged & seq_len(M_IMPUTATIONS) <= length(fcor_list))
+      valid_fc <- valid_fc[sapply(valid_fc, function(i) !is.null(fcor_list[[i]]))]
+      if (length(valid_fc) > 0) {
+        ref_fc <- fcor_list[[valid_fc[1]]]
+        if (nrow(ref_fc) > 0) {
+          cat("\n  Pooled Factor Correlations:\n")
+          for (r in seq_len(nrow(ref_fc))) {
+            fvals <- sapply(fcor_list[valid_fc], function(x) x$est.std[r])
+            cat(sprintf("    %s ~~ %s: r = %s\n",
+                        ref_fc$lhs[r], ref_fc$rhs[r],
+                        fmt(mean(fvals, na.rm = TRUE))))
+          }
+        }
+      }
+    }
+
+    cat("  [Note: chi2 averaged across imputations (approximation).]\n")
+    cat("```\n\n")
+
+    cfa_rows[[mod_nm]] <- data.frame(
+      Model = mod_nm, n = avg_n, estimator = "ML",
+      chi2 = unname(fi_pooled["chisq"]),
+      df = round(unname(fi_pooled["df"])),
+      p = unname(fi_pooled["pvalue"]),
+      CFI = unname(fi_pooled["cfi"]),
+      TLI = unname(fi_pooled["tli"]),
+      RMSEA = unname(fi_pooled["rmsea"]),
+      RMSEA_CI_low = unname(fi_pooled["rmsea.ci.lower"]),
+      RMSEA_CI_high = unname(fi_pooled["rmsea.ci.upper"]),
+      SRMR = unname(fi_pooled["srmr"]),
+      verdict = if (is_just_identified) "Just-identified" else
+        paste(verdict_cfi(fi_pooled["cfi"]),
+              verdict_rmsea(fi_pooled["rmsea"]), sep = "/"),
+      stringsAsFactors = FALSE, row.names = NULL)
+  }
+}
+```
+
+## CFA Fit Summary
+
+```{r cfa-summary}
+cfa_df <- do.call(rbind, cfa_rows)
+write.csv(cfa_df, file.path(OUT_DIR, "cfa_fit_summary.csv"), row.names = FALSE)
+cfa_df
+```
+
+
+# Correlation Heatmaps {.tabset}
+
+## AI Scales — Faceted
+
+```{r heatmap-ai-faceted, fig.width=11, fig.height=7.5}
+all_mirror <- data.frame()
+
+for (nm in names(ai_scales)) {
+  dat_i <- ai_data[[nm]]
+  cm <- cor(dat_i, use = "pairwise.complete.obs")
+  std_labels <- paste("Item", 1:6)
+  rownames(cm) <- colnames(cm) <- std_labels
+
+  df <- as.data.frame(cm)
+  df$Var1 <- factor(std_labels, levels = rev(std_labels))
+  long <- pivot_longer(df, cols = -Var1, names_to = "Var2", values_to = "r")
+  long$Var2 <- factor(long$Var2, levels = std_labels)
+  long$r_fill  <- ifelse(long$Var1 == long$Var2, 1.0, long$r)
+  long$r_label <- ifelse(long$Var1 == long$Var2, "", sprintf("%.2f", long$r))
+  long$Scale <- nm
+  all_mirror <- rbind(all_mirror, long)
+}
+
+all_mirror$Scale <- factor(all_mirror$Scale, levels = c(
+  "GPT5 Zero-Shot", "GPT5 Few-Shot-Basic", "GPT5 Few-Shot-Advanced",
+  "Google Zero-Shot", "Google Few-Shot-Basic", "Google Few-Shot-Advanced"))
+all_mirror$text_col <- ifelse(all_mirror$r_fill > 0.7, "white", "grey20")
+
+anno_cells <- all_mirror[all_mirror$Scale == "Google Zero-Shot" &
+                           all_mirror$Var1 != all_mirror$Var2 &
+                           (all_mirror$Var1 == "Item 3" | all_mirror$Var2 == "Item 3"), ]
+
+anno_label <- data.frame(
+  Var2  = factor("Item 5", levels = levels(all_mirror$Var2)),
+  Var1  = factor("Item 1", levels = levels(all_mirror$Var1)),
+  Scale = factor("Google Zero-Shot", levels = levels(all_mirror$Scale)),
+  label = "Item 3 = Res_Item3_R\n(reverse-coded;\nnear-zero correlations)")
+
+p_ai <- ggplot(all_mirror, aes(Var2, Var1, fill = r_fill)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_tile(data = anno_cells, fill = NA, color = "#B2182B", linewidth = 0.8) +
+  geom_text(aes(label = r_label, color = text_col), size = 2.3) +
+  scale_color_identity() +
+  geom_label(data = anno_label, aes(x = Var2, y = Var1, label = label),
+             fill = "white", color = "#B2182B", size = 2.2,
+             fontface = "italic", label.padding = unit(0.2, "lines"),
+             label.size = 0.3, inherit.aes = FALSE) +
+  scale_fill_gradientn(
+    colours = c("#FFFFFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
+    values  = c(0, 0.25, 0.50, 0.75, 1.0),
+    limits  = c(-0.1, 1),
+    name    = expression(italic(r))) +
+  facet_wrap(~ Scale, ncol = 3) +
+  labs(x = NULL, y = NULL,
+       title = "Inter-Item Correlation Matrices Across AI-Generated Resolution Scales",
+       caption = "Note. Red-bordered cells in the Google Zero-Shot panel indicate Res_Item3_R (reverse-coded, already reverse-scored), which shows near-zero correlations with all other items.") +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 8),
+    panel.grid  = element_blank(),
+    strip.text  = element_text(face = "bold", size = 9),
+    plot.title  = element_text(face = "bold", size = 11),
+    plot.caption = element_text(hjust = 0, size = 7.5, face = "italic"),
+    legend.key.height = unit(1.2, "cm"))
+
+p_ai
+
+ggsave(file.path(OUT_DIR, "heatmap_AI_faceted_mirrored.png"),
+       p_ai, width = 11, height = 7.5, dpi = 250)
+ggsave(file.path(OUT_DIR, "heatmap_AI_faceted_mirrored.pdf"),
+       p_ai, width = 11, height = 7.5, device = cairo_pdf)
+```
+
+## Criterion Subscales — Individual
+
+```{r heatmap-criterion, fig.width=6, fig.height=5.5, results='asis'}
+for (sub_nm in names(cri_subscales)) {
+  sub_items <- cri_subscales[[sub_nm]]
+  corr_list <- list()
+  for (m in seq_len(M_IMPUTATIONS)) {
+    d <- imputed_dfs[[m]][, sub_items, drop = FALSE]
+    d <- d[complete.cases(d), , drop = FALSE]
+    corr_list[[m]] <- cor(d, use = "pairwise.complete.obs")
+  }
+  pooled <- pool_corr_fisher(corr_list)
+  short <- gsub("CF_CRI_TRU\\.", "", sub_items)
+  rownames(pooled) <- colnames(pooled) <- short
+  k <- length(short)
+
+  df <- as.data.frame(pooled)
+  df$Var1 <- factor(short, levels = rev(short))
+  long <- pivot_longer(df, cols = -Var1, names_to = "Var2", values_to = "r")
+  long$Var2 <- factor(long$Var2, levels = short)
+  long$r_fill  <- ifelse(long$Var1 == long$Var2, 1.0, long$r)
+  long$r_label <- ifelse(long$Var1 == long$Var2, "", sprintf("%.2f", long$r))
+  long$text_col <- ifelse(long$r_fill > 0.7, "white", "grey20")
+
+  clean_name <- gsub("Criterion: ", "", sub_nm)
+
+  pi <- ggplot(long, aes(Var2, Var1, fill = r_fill)) +
+    geom_tile(color = "white", linewidth = 0.5) +
+    geom_text(aes(label = r_label, color = text_col),
+              size = ifelse(k > 10, 2.2, 3.2)) +
+    scale_color_identity() +
+    scale_fill_gradientn(
+      colours = c("#FFFFFF", "#C6DBEF", "#6BAED6", "#2171B5", "#08306B"),
+      values  = c(0, 0.25, 0.50, 0.75, 1.0),
+      limits  = c(-0.1, 1),
+      name    = expression(italic(r))) +
+    labs(title = paste0("Inter-Item Correlation Matrix: ", clean_name, " (Pooled, m = 20)"),
+         x = NULL, y = NULL,
+         caption = "Note. Item numbers correspond to CF_CRI_TRU indices. Correlations pooled via Fisher z-transformation.") +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid = element_blank(),
+          plot.title = element_text(face = "bold", size = 11),
+          plot.caption = element_text(hjust = 0, size = 7.5, face = "italic"),
+          legend.key.height = unit(1.2, "cm"))
+
+  print(pi)
+
+  w <- ifelse(k > 10, 11, 6)
+  h <- ifelse(k > 10, 9.5, 5.5)
+  file_tag <- gsub("[: ]", "_", sub_nm)
+  ggsave(file.path(OUT_DIR, sprintf("heatmap_%s.png", file_tag)),
+         pi, width = w, height = h, dpi = 250)
+  ggsave(file.path(OUT_DIR, sprintf("heatmap_%s.pdf", file_tag)),
+         pi, width = w, height = h, device = cairo_pdf)
+}
+```
+
+
+# Executive Summary
+
+```{r exec-summary}
+comp <- merge(
+  rel_df[, c("Scale", "n", "alpha", "omega_tot", "mean_IIC")],
+  efa_df[, c("Scale", "n_factors_parallel")],
+  by = "Scale", all = TRUE)
+
+cfa_1f <- cfa_df[!grepl("2-Factor|3-Factor", cfa_df$Model), ]
+cfa_1f$Scale <- cfa_1f$Model
+comp <- merge(comp, cfa_1f[, c("Scale", "CFI", "RMSEA")],
+              by = "Scale", all.x = TRUE)
+
+comp$alpha     <- round(comp$alpha, 3)
+comp$omega_tot <- round(comp$omega_tot, 3)
+comp$mean_IIC  <- round(comp$mean_IIC, 3)
+comp$CFI       <- round(comp$CFI, 3)
+comp$RMSEA     <- round(comp$RMSEA, 3)
+
+comp
+```
