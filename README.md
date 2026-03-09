@@ -12,6 +12,7 @@ Psychometric validation of AI-generated psychological scales using a 2 (LLM) × 
 📄 **[View the Full Interactive Report for AI-Generated Global Self-Esteem Scale [Will be shared soon - Spring 2026]]**
 
 📄 **[View the Full Interactive Report for AI-Generated Mindfulness [Will be shared soon - Spring 2026]→]**
+
 ---
 
 ## Overview
