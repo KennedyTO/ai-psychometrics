@@ -84,6 +84,7 @@ rmarkdown::render("psychometric_analysis_revised.Rmd")
 This work is part of a broader MA thesis investigating **automatic item generation (AIG) using large language models** — an emerging area at the intersection of AI and psychometrics. The research examines whether LLMs can serve as a scalable tool for generating measurement items that meet the standards required for psychological assessment.
 
 The study was submitted to the **International Meeting of the Psychometric Society (IMPS 2025)**.
+The thesis will be presented at the Canadian Psychological Association in 2026
 
 ## Contact
 
