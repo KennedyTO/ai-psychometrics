@@ -42,7 +42,7 @@ The analysis proceeds through four stages, each building on the last:
 | **Reliability** | Cronbach's α (Feldt CI), McDonald's ω | Quantify internal consistency; identify underperforming items |
 | **Exploratory Factor Analysis** | Principal axis factoring, parallel analysis, oblimin rotation | Determine dimensionality; verify unidimensional structure |
 | **Confirmatory Factor Analysis** | ML estimation via `lavaan` | Test hypothesized factor structures; evaluate model fit |
-| **Criterion Validity** | Pearon *r*, Inter-scale correlations | between AI-generated Resolution scale scores and established criterion measures |
+| **Criterion Validity** | Pearon *r*, Inter-scale correlations | Between AI-generated Resolution scale scores and established criterion measures |
 
 For the criterion scale, all analyses incorporate **multiple imputation** (*m* = 20) with results pooled via **Rubin's rules**, including full FMI (fraction of missing information) reporting.
 
