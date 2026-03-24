@@ -9,6 +9,8 @@ Psychometric validation of AI-generated psychological scales using a 2 (LLM) × 
 
 📄 **[View the Full Interactive Report for AI-Generated Cognitive Fluency Scale →](https://kennedyto.github.io/ai-psychometrics/)**
 
+📄 **[View the Interactive Presentation for AI-Generated Cognitive Fluency Scale →]([https://www.notion.so/Can-Al-Generate-a-Valid-Psychological-Scale-for-a-Novel-Construct-32d9967ae43c80859aadcdfe789c5ecb?source=copy_link])**
+
 📄 **[View the Full Interactive Report for AI-Generated Global Self-Esteem Scale [Will be shared soon - Spring 2026]]**
 
 📄 **[View the Full Interactive Report for AI-Generated Mindfulness [Will be shared soon - Spring 2026]→]**
